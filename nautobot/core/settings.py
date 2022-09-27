@@ -329,6 +329,7 @@ INSTALLED_APPS = [
     "django_extensions",
     "nautobot.core.apps.ConstanceDatabaseAppConfig",  # fix default_auto_field
     "django_ajax_tables",
+    "import_export",
 ]
 
 # Middleware
@@ -666,6 +667,23 @@ CELERY_BEAT_SCHEDULER = "nautobot.core.celery.schedulers:NautobotDatabaseSchedul
 # Sets an age out timer of redis lock. This is NOT implicitially applied to locks, must be added
 # to a lock creation as `timeout=settings.REDIS_LOCK_TIMEOUT`
 REDIS_LOCK_TIMEOUT = int(os.getenv("NAUTOBOT_REDIS_LOCK_TIMEOUT", "600"))
+
+#
+# Import/Export
+#
+
+# Controls if resource importing should use database transactions. Defaults to `False`. Using
+# transactions makes imports safer as a failure during import won’t import only part of the data
+# set.
+IMPORT_EXPORT_USE_TRANSACTIONS = True
+
+# If set, lists the permission code that is required for users to perform the “import” action.
+# Defaults to `None`, which means everybody can perform imports.
+IMPORT_EXPORT_IMPORT_PERMISSION_CODE = "add"
+
+# If set, lists the permission code that is required for users to perform the “export” action.
+# Defaults to `None`, which means everybody can perform exports.
+IMPORT_EXPORT_EXPORT_PERMISSION_CODE = "view"
 
 #
 # Custom branding (logo and title)
