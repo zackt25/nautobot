@@ -1,17 +1,28 @@
+from collections import OrderedDict
 import logging
 import platform
-from collections import OrderedDict
 
 from django import __version__ as DJANGO_VERSION
 from django.apps import apps
 from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist
+from django.http import HttpResponse
 from django.http.response import HttpResponseBadRequest
 from django.db import transaction
 from django.db.models import ProtectedError
 from django.shortcuts import redirect
+from django.utils.translation import gettext_lazy as _
 from django_rq.queues import get_connection as get_rq_connection
+from graphql import get_default_backend
+from graphql.execution import ExecutionResult
+from graphql.type.schema import GraphQLSchema
+from graphql.execution.middleware import MiddlewareManager
+from graphene_django.settings import graphene_settings
+from graphene_django.views import GraphQLView, instantiate_middleware, HttpError
+from import_export.formats.base_formats import CSV, HTML, JSON, ODS, TSV, XLS, XLSX, YAML
+from import_export.resources import ModelResource
 from rest_framework import status
+from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.reverse import reverse
 from rest_framework.views import APIView
@@ -24,19 +35,16 @@ from drf_spectacular.renderers import OpenApiJsonRenderer
 from drf_spectacular.utils import extend_schema
 from drf_spectacular.views import SpectacularSwaggerView, SpectacularRedocView
 from rq.worker import Worker as RQWorker
-
-from graphql import get_default_backend
-from graphql.execution import ExecutionResult
-from graphql.type.schema import GraphQLSchema
-from graphql.execution.middleware import MiddlewareManager
-from graphene_django.settings import graphene_settings
-from graphene_django.views import GraphQLView, instantiate_middleware, HttpError
+from tablib import Dataset
 
 from nautobot.core.celery import app as celery_app
 from nautobot.core.api import BulkOperationSerializer
 from nautobot.core.api.exceptions import SerializerNotFound
 from nautobot.utilities.api import get_serializer_for_model
+
 from . import serializers
+from .exceptions import ExportError
+
 
 HTTP_ACTIONS = {
     "GET": "view",
@@ -47,6 +55,18 @@ HTTP_ACTIONS = {
     "PATCH": "change",
     "DELETE": "delete",
 }
+
+EXPORT_FORMATS_DICT = {
+    "csv": CSV.CONTENT_TYPE,
+    "xls": XLS.CONTENT_TYPE,
+    "xlsx": XLSX.CONTENT_TYPE,
+    "tsv": TSV.CONTENT_TYPE,
+    "ods": ODS.CONTENT_TYPE,
+    "yaml": YAML.CONTENT_TYPE,
+    "json": JSON.CONTENT_TYPE,
+    "html": HTML.CONTENT_TYPE,
+}
+IMPORT_FORMATS_DICT = EXPORT_FORMATS_DICT
 
 
 #
@@ -266,7 +286,85 @@ class ModelViewSetMixin:
             return self.finalize_response(request, Response({"detail": msg}, status=409), *args, **kwargs)
 
 
+class ExportMixin:
+    """Export Mixin"""
+
+    export_filename: str = "Default"
+    export_resource: ModelResource = None
+
+    @action(detail=False, methods=["get"])
+    def export(self, request, *args, **kwargs):
+        filename = self.export_filename
+        eformat = request.query_params.get("eformat", "csv")
+
+        queryset = self.filter_queryset(self.get_queryset())
+
+        dataset = self.get_resource().export(queryset)
+
+        if not hasattr(dataset, eformat):
+            raise ExportError(detail=_("Unsupport export format"), code="unsupport_export_format")
+
+        data, content_type = (
+            getattr(dataset, eformat),
+            EXPORT_FORMATS_DICT[eformat],
+        )
+
+        response = HttpResponse(data, content_type=content_type)
+        response["Content-Disposition"] = f'attachment; filename="{filename}_.{eformat}"'
+        return response
+
+    def get_resource(self):
+        from import_export import resources
+
+        if not self.export_resource:
+            try:
+                resource = resources.modelresource_factory(model=self.queryset.model)()
+                return resource
+            except Exception:
+                raise ExportError(detail=_("Please set export resource"))
+        return self.export_resource()
+
+
+class ImportMixin:
+    """Import Mixin"""
+
+    import_resource: ModelResource = None
+
+    @action(methods=["post"], detail=False)
+    def import_data(self, request, *args, **kwargs):
+        file = request.FILES["file"]
+        extension = file.name.split(".")[-1].lower()
+        import_resource = self.get_import_resource()
+        dataset = Dataset()
+
+        if extension in IMPORT_FORMATS_DICT:
+            dataset.load(file.read(), format=extension)
+        else:
+            raise ImportError("Unsupport import format", code="unsupport_import_format")
+
+        result = import_resource.import_data(
+            dataset,
+            dray_run=True,
+            collect_failed_rows=True,
+            raise_errors=True,
+        )
+
+        if not result.has_validation_errors() or result.has_errors():
+            result = import_resource.import_data(dataset, dry_run=False, raise_errors=True)
+        else:
+            raise ImportError("Import data failed", code="import_data_failed")
+
+        return Response(data={"message": "Import successed"}, status=status.HTTP_201_CREATED)
+
+    def get_import_resource(self):
+        if not self.import_resource:
+            raise ImportError(detail=_("Pleause set import resource"))
+        return self.import_resource()
+
+
 class ModelViewSet(
+    ExportMixin,
+    ImportMixin,
     NautobotAPIVersionMixin,
     BulkUpdateModelMixin,
     BulkDestroyModelMixin,

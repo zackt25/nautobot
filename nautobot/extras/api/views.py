@@ -1063,11 +1063,15 @@ class SecretsGroupAssociationViewSet(ModelViewSet):
 # Statuses
 #
 
+from nautobot.extras.admin import StatusResource
 
 class StatusViewSet(NautobotModelViewSet):
     """
     View and manage custom status choices for objects with a `status` field.
     """
+
+    # Comment me out to test out the ModelResource factory pattern.
+    export_resource = StatusResource
 
     queryset = Status.objects.all()
     serializer_class = serializers.StatusSerializer
