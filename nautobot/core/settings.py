@@ -165,9 +165,16 @@ REST_FRAMEWORK = {
     "DEFAULT_METADATA_CLASS": "nautobot.core.api.metadata.BulkOperationMetadata",
     "DEFAULT_PAGINATION_CLASS": "nautobot.core.api.pagination.OptionalLimitOffsetPagination",
     "DEFAULT_PERMISSION_CLASSES": ("nautobot.core.api.authentication.TokenPermissions",),
+    "DEFAULT_PARSER_CLASSES": (
+        "rest_framework.parsers.JSONParser",
+        "rest_framework.parsers.FormParser",
+        "rest_framework.parsers.MultiPartParser",
+        "rest_framework_csv.parsers.CSVParser",
+    ),
     "DEFAULT_RENDERER_CLASSES": (
         "rest_framework.renderers.JSONRenderer",
         "nautobot.core.api.renderers.FormlessBrowsableAPIRenderer",
+        "rest_framework_csv.renderers.PaginatedCSVRenderer",
     ),
     "DEFAULT_SCHEMA_CLASS": "nautobot.core.api.schema.NautobotAutoSchema",
     # Version to use if the client doesn't request otherwise.
