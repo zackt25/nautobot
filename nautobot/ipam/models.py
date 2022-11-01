@@ -453,6 +453,14 @@ class Prefix(PrimaryModel, StatusModel):
     )
     broadcast = VarbinaryIPField(null=False, db_index=True, help_text="IPv4 or IPv6 broadcast address")
     prefix_length = models.IntegerField(null=False, db_index=True, help_text="Length of the Network prefix, in bits.")
+    parent = models.ForeignKey(
+        "self",
+        blank=True,
+        null=True,
+        related_name="children",
+        on_delete=models.PROTECT,
+        help_text="The parent Prefix of this Prefix.",
+    )
     site = models.ForeignKey(
         to="dcim.Site",
         on_delete=models.PROTECT,
@@ -502,6 +510,19 @@ class Prefix(PrimaryModel, StatusModel):
         verbose_name="Is a pool",
         default=False,
         help_text="All IP addresses within this prefix are considered usable",
+    )
+    ip_family = models.IntegerField(
+        choices=((4,4), (6,6)),
+        null=True,
+        editable=False,
+        db_index=True,
+    )
+    is_ip = models.BooleanField(
+        verbose_name="Is an IP Address",
+        db_index=True,
+        editable=False,
+        default=False,
+        help_text="Whether or not this Prefix is a host address.",
     )
     description = models.CharField(max_length=200, blank=True)
 
@@ -578,6 +599,51 @@ class Prefix(PrimaryModel, StatusModel):
             cls.__status_container = Status.objects.get_for_model(Prefix).get(slug="container")
         return cls.__status_container
 
+    def reparent_subnets(self):
+        """
+        Determine list of child nodes and set the parent to self.
+        """
+        query = Prefix.objects.select_for_update().filter(
+            ~models.Q(id=self.id),  # Don't include yourself...
+            parent_id=self.parent_id,
+            prefix_length__gt=self.prefix_length,
+            ip_family=self.ip_family,
+            network__gte=self.network,
+            broadcast__lte=self.broadcast,
+            tenant=self.tenant,
+            vrf=self.vrf,
+        )
+
+        query.update(parent=self)
+
+    def supernets(self, direct=False, discover_mode=False, for_update=False):
+        query = Prefix.objects.all()
+
+        if self.parent is None and not discover_mode:
+            return query.none()
+
+        if discover_mode and direct:
+            raise exc.ValidationError(
+                "Direct is incompatible with discover_mode."
+            )
+
+        if for_update:
+            query = query.select_for_update()
+
+        if direct:
+            return query.filter(id=self.parent.id)
+
+        return query.filter(
+            # site=self.site,
+            is_ip=False,
+            ip_family=self.ip_family,
+            prefix_length__lt=self.prefix_length,
+            network__lte=self.network,
+            broadcast__gte=self.broadcast,
+            tenant=self.tenant,
+            vrf=self.vrf,
+        )
+
     def clean(self):
         super().clean()
 
@@ -612,6 +678,15 @@ class Prefix(PrimaryModel, StatusModel):
 
             # Clear host bits from prefix
             self.prefix = self.prefix.cidr
+
+        supernets = self.supernets(discover_mode=True)
+        if supernets:
+            import operator
+            parent = max(supernets, key=operator.attrgetter("prefix_length"))
+            self.parent = parent
+
+        if self.parent is None and self.is_ip:
+            raise ValidationError("IP Address needs a parent network.")
 
         super().save(*args, **kwargs)
 
@@ -746,6 +821,22 @@ class Prefix(PrimaryModel, StatusModel):
             return UtilizationData(numerator=child_count, denominator=prefix_size)
 
 
+
+class IPPrefixQuerySet(PrefixQuerySet):
+    def get_queryset(self):
+        # It's an "IP" if the network address matches the broadcast address.
+        # Except when it isn't.
+        # return super().get_queryset().filter(network=F("broadcast"))
+        return super().get_queryset().filter(is_ip=True)
+
+
+class IPPrefix(Prefix):
+    class Meta:
+        proxy = True
+
+    objects = IPPrefixQuerySet.as_manager()
+
+
 @extras_features(
     "custom_fields",
     "custom_links",
@@ -776,6 +867,14 @@ class IPAddress(PrimaryModel, StatusModel):
     )
     broadcast = VarbinaryIPField(null=False, db_index=True, help_text="IPv4 or IPv6 broadcast address")
     prefix_length = models.IntegerField(null=False, db_index=True, help_text="Length of the Network prefix, in bits.")
+    parent = models.ForeignKey(
+        "ipam.Prefix",
+        blank=True,
+        null=True,
+        related_name="child_ips",
+        on_delete=models.PROTECT,
+        help_text="The parent Prefix of this IP Address.",
+    )
     vrf = models.ForeignKey(
         to="ipam.VRF",
         on_delete=models.PROTECT,
