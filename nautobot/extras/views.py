@@ -15,7 +15,7 @@ from django.template.loader import TemplateDoesNotExist, get_template
 from django.urls import reverse
 from django.utils import timezone
 from django.utils.html import escape
-from django.utils.http import is_safe_url
+from django.utils.http import url_has_allowed_host_and_scheme
 from django.utils.safestring import mark_safe
 from django.views.generic import View
 from django_tables2 import RequestConfig
@@ -427,7 +427,7 @@ class CustomFieldEditView(generic.ObjectEditView):
                     return redirect(request.get_full_path())
 
                 return_url = form.cleaned_data.get("return_url")
-                if return_url is not None and is_safe_url(url=return_url, allowed_hosts=request.get_host()):
+                if return_url is not None and url_has_allowed_host_and_scheme(url=return_url, allowed_hosts=request.get_host()):
                     return redirect(return_url)
                 else:
                     return redirect(self.get_return_url(request, obj))
@@ -664,7 +664,7 @@ class DynamicGroupEditView(generic.ObjectEditView):
                     return redirect(request.get_full_path())
 
                 return_url = form.cleaned_data.get("return_url")
-                if return_url is not None and is_safe_url(url=return_url, allowed_hosts=request.get_host()):
+                if return_url is not None and url_has_allowed_host_and_scheme(url=return_url, allowed_hosts=request.get_host()):
                     return redirect(return_url)
                 else:
                     return redirect(self.get_return_url(request, obj))
@@ -2079,7 +2079,7 @@ class SecretsGroupEditView(generic.ObjectEditView):
                     return redirect(request.get_full_path())
 
                 return_url = form.cleaned_data.get("return_url")
-                if return_url is not None and is_safe_url(url=return_url, allowed_hosts=request.get_host()):
+                if return_url is not None and url_has_allowed_host_and_scheme(url=return_url, allowed_hosts=request.get_host()):
                     return redirect(return_url)
                 else:
                     return redirect(self.get_return_url(request, obj))

@@ -5,9 +5,13 @@ import sys
 
 from django.contrib.messages import constants as messages
 import django.forms
+import django
+from django.utils.encoding import force_str
 
 from nautobot import __version__
 from nautobot.core.settings_funcs import is_truthy, parse_redis_connection, ConstanceConfigItem  # noqa: F401
+
+django.utils.encoding.force_text = force_str
 
 #
 # Environment setup
