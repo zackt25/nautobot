@@ -808,6 +808,8 @@ class IPAddressMergeView(view_mixins.GetReturnURLMixin, view_mixins.ObjectPermis
                     # Update Device primary_ip fields of the Collapsed IPs
                     Device.objects.filter(pk__in=device_ip4).update(primary_ip4=merged_ip)
                     Device.objects.filter(pk__in=device_ip6).update(primary_ip6=merged_ip)
+                    VirtualMachine.objects.filter(pk__in=device_ip4).update(primary_ip4=merged_ip)
+                    VirtualMachine.objects.filter(pk__in=device_ip6).update(primary_ip6=merged_ip)
                     for service in services:
                         Service.objects.get(pk=service).ip_addresses.add(merged_ip)
                     logger.info(msg)
