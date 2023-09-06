@@ -1254,18 +1254,18 @@ def sum_tests_times(context):
         except StopIteration:
             item = {"file": filename, "time": 0.0}
             files.append(item)
-        time = float(root.attrib.get("time", 0.0))
-        item["time"] += time
-        sum_time += time
+        item_time = float(root.attrib.get("time", 0.0))
+        item["time"] += item_time
+        sum_time += item_time
 
     # Magic value other times will relate to
     relative_to = sum_time / len(files) / _MAGIC_CONSTANT
 
-    def relativise(time: float) -> int:
+    def relativise(value: float) -> int:
         "Keep only 4 bits of precision relative to the magic value"
-        if time == 0.0:
+        if value == 0.0:
             return 0
-        integer = round(time / relative_to)
+        integer = round(value / relative_to)
         if integer == 0:
             return 1
         shift_len = len(bin(integer)) - 4 - 2  # 2 for `0b` prefix
