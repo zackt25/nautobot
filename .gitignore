@@ -28,6 +28,8 @@ jobs/*
 htmlcov/*
 /nautobot/project-static/docs/
 /examples/example_plugin/example_plugin/static/example_plugin/docs/
-development/factory_dump.json
+development/factory_dump*.json
 node_modules
 nautobot/ui
+/.test-results/
+/compose.yaml

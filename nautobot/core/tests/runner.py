@@ -1,11 +1,12 @@
+from time import sleep
+
 import yaml
-
-from django.core.management import call_command
 from django.conf import settings
-from django.test.runner import DiscoverRunner
+from django.core.management import call_command, CommandError
+from xmlrunner.extra.djangotestrunner import XMLTestRunner
 
 
-class NautobotTestRunner(DiscoverRunner):
+class NautobotTestRunner(XMLTestRunner):
     """
     Custom test runner that excludes integration tests by default.
 
@@ -21,8 +22,9 @@ class NautobotTestRunner(DiscoverRunner):
 
     exclude_tags = ["integration"]
 
-    def __init__(self, cache_test_fixtures=False, **kwargs):
+    def __init__(self, cache_test_fixtures=False, fixture_file="", **kwargs):
         self.cache_test_fixtures = cache_test_fixtures
+        self.fixture_file = fixture_file
 
         # Assert "integration" hasn't been provided w/ --tag
         incoming_tags = kwargs.get("tags") or []
@@ -44,6 +46,11 @@ class NautobotTestRunner(DiscoverRunner):
             action="store_true",
             help="Save test database to a json fixture file to re-use on subsequent tests.",
         )
+        parser.add_argument(
+            "--fixture-file",
+            type=str,
+            help="Filename to use to store fixtures.",
+        )
 
     def setup_test_environment(self, **kwargs):
         super().setup_test_environment(**kwargs)
@@ -59,6 +66,8 @@ class NautobotTestRunner(DiscoverRunner):
                 command += ["--seed", settings.TEST_FACTORY_SEED]
             if self.cache_test_fixtures:
                 command += ["--cache-test-fixtures"]
+            if self.fixture_file:
+                command += [f"--fixture-file={self.fixture_file}"]
             for connection in result:
                 db_name = connection[0].alias
                 print(f'Pre-populating test database "{db_name}" with factory data...')
@@ -71,7 +80,7 @@ class NautobotTestRunner(DiscoverRunner):
         if settings.TEST_USE_FACTORIES and old_config:
             for connection in old_config:
                 db_name = connection[0].alias
-                print(f'Emptying test database "{db_name}"...')
+                print(f'Flushing test database "{db_name}"...')
                 call_command("flush", "--no-input", "--database", db_name)
                 print(f"Database {db_name} emptied!")
 

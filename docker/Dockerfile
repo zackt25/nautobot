@@ -162,8 +162,7 @@ COPY examples /source/examples
 WORKDIR /source
 
 # Install (non-development) Python dependencies of Nautobot
-RUN --mount=type=cache,target="/root/.cache/pip" \
-    --mount=type=cache,target="/root/.cache/pypoetry" \
+RUN --mount=type=cache,target="/root/.cache" \
     poetry install --no-root --only main --no-ansi --extras all && \
     rm -rf /tmp/tmp*
 
@@ -177,8 +176,7 @@ FROM dependencies as dependencies-dev-python
 # Add development-specific dependencies of Nautobot to the installation
 # Poetry 1.2.0 leaves files in /tmp after doing an install
 # https://github.com/python-poetry/poetry/issues/6425
-RUN --mount=type=cache,target="/root/.cache/pip" \
-    --mount=type=cache,target="/root/.cache/pypoetry" \
+RUN --mount=type=cache,target="/root/.cache" \
     poetry install --no-root --no-ansi --extras all && \
     rm -rf /tmp/tmp*
 
@@ -260,8 +258,7 @@ FROM dependencies-dev as dev
 
 # Poetry 1.2.0 leaves files in /tmp after doing an install
 # https://github.com/python-poetry/poetry/issues/6425
-RUN --mount=type=cache,target="/root/.cache/pip" \
-    --mount=type=cache,target="/root/.cache/pypoetry" \
+RUN --mount=type=cache,target="/root/.cache" \
     poetry install --no-ansi --extras all && \
     rm -rf /source && \
     rm -rf /tmp/tmp*
