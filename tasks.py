@@ -13,10 +13,14 @@ limitations under the License.
 """
 
 import os
+from pathlib import Path
 import re
+from typing import List
+from typing import Union
 
-from invoke import Collection, task as invoke_task
+from invoke.collection import Collection
 from invoke.exceptions import Exit
+from invoke.tasks import task as invoke_task
 
 try:
     # Override built-in print function with rich's pretty-printer function, if available
@@ -25,17 +29,26 @@ try:
     from rich.markup import escape
 
     console = Console()
-
-    HAS_RICH = True
 except ModuleNotFoundError:
-    HAS_RICH = False
-
+    print = print
+    console = None
+    escape = None
 
 # Base directory path from this file.
-BASE_DIR = os.path.join(os.path.dirname(__file__))
+BASE_PATH = Path(__file__).parent.absolute().resolve()
+DOCKER_SOURCE_PATH = Path("/source")
+DOCKER_NAUTOBOT_PATH = Path("/opt/nautobot")
 
 # Base directory path for Nautobot UI.
-NAUTOBOT_UI_DIR = os.path.join(BASE_DIR, "nautobot/ui")
+NAUTOBOT_UI_DIR = "nautobot/ui"
+
+
+def _get_ui_path(context):
+    """Return the path to the UI directory."""
+    if is_truthy(context.nautobot.local):
+        return BASE_PATH / NAUTOBOT_UI_DIR
+    else:
+        return DOCKER_NAUTOBOT_PATH / NAUTOBOT_UI_DIR
 
 
 def is_truthy(arg):
@@ -62,6 +75,35 @@ def is_truthy(arg):
         raise ValueError(f"Invalid truthy value: `{arg}`")
 
 
+def _resolve_default_run(context, default_run=None, service="nautobot") -> str:
+    """Resolve the default docker execution method and keep track of service.
+
+    Possible return values are "local", "exec", or "run".
+    "exec" and "run" are executed using docker compose.
+
+    Service is used when calling `run_command()`.
+    """
+    if default_run is None:
+        if context.nautobot.default_run is not None:
+            if context.nautobot.default_run_service == service:
+                return context.nautobot.default_run
+
+        if is_truthy(context.nautobot.local):
+            result = "local"
+        else:
+            ps_result = docker_compose(context, "ps --services --filter status=running", hide=True)
+            result = "exec" if "nautobot" in ps_result.stdout else "run"
+    else:
+        result = default_run
+
+    if result in ("local", "exec", "run"):
+        context.nautobot.default_run = result
+        context.nautobot.default_run_service = service
+        return result
+
+    raise ValueError(f"Invalid --default-exec: {default_run}")
+
+
 # Use pyinvoke configuration for default values, see http://docs.pyinvoke.org/en/stable/concepts/configuration.html
 # Variables may be overwritten in invoke.yml or by the environment variables INVOKE_NAUTOBOT_xxx
 namespace = Collection("nautobot")
@@ -71,7 +113,8 @@ namespace.configure(
             "project_name": "nautobot",
             "python_ver": "3.8",
             "local": False,
-            "compose_dir": os.path.join(BASE_DIR, "development/"),
+            "compose_dir": str(BASE_PATH / "development"),
+            "default_run": None,
             "compose_files": [
                 "docker-compose.yml",
                 "docker-compose.postgres.yml",
@@ -139,13 +182,13 @@ def print_command(command, env=None):
     formatted_env = ""
     if env:
         formatted_env = " \\\n".join(f"{var}={value}" for var, value in env.items()) + " \\\n"
-    if HAS_RICH:
+    if console and escape:
         console.print(f"[dim]{escape(formatted_env)}{escape(formatted_command)}[/dim]", soft_wrap=True)
     else:
         print(f"{formatted_env}{formatted_command}")
 
 
-def docker_compose(context, command, **kwargs):
+def docker_compose(context, command: Union[str, List[str]], service="", service_command="", env=None, **kwargs):
     """Helper function for running a specific docker-compose command with all appropriate parameters and environment.
 
     Args:
@@ -153,51 +196,61 @@ def docker_compose(context, command, **kwargs):
         command (str): Command string to append to the "docker-compose ..." command, such as "build", "up", etc.
         **kwargs: Passed through to the context.run() call.
     """
-    compose_command_tokens = [
+    if not isinstance(service_command, list):
+        service_command = [service_command] if service_command else []
+
+    compose_command = [
         "docker-compose",
         f'--project-name "{context.nautobot.project_name}"',
         f'--project-directory "{context.nautobot.compose_dir}"',
+        *(f"--file development/{filename}" for filename in context.nautobot.compose_files),
+        *(command if isinstance(command, list) else [command]),
+        f"-- {service}" if service else "",
+        *service_command,
     ]
 
-    for compose_file in context.nautobot.compose_files:
-        compose_file_path = os.path.join(context.nautobot.compose_dir, compose_file)
-        compose_command_tokens.append(f'-f "{compose_file_path}"')
-
-    compose_command_tokens.append(command)
-
-    # If `service` was passed as a kwarg, add it to the end.
-    service = kwargs.pop("service", None)
-    if service is not None:
-        compose_command_tokens.append(service)
-
     print(f'Running docker-compose command "{command}"')
-    compose_command = " ".join(compose_command_tokens)
-    env = kwargs.pop("env", {})
-    env.update({"PYTHON_VER": context.nautobot.python_ver})
+    compose_command = " ".join(compose_command)
     if "hide" not in kwargs:
         print_command(compose_command, env=env)
     return context.run(compose_command, env=env, **kwargs)
 
 
-def run_command(context, command, service="nautobot", **kwargs):
-    """Wrapper to run a command locally or inside the provided container."""
-    if is_truthy(context.nautobot.local):
-        env = kwargs.pop("env", {})
-        if "hide" not in kwargs:
+def run_command(
+    context,
+    command: Union[str, List[str]],
+    service="nautobot",
+    default_run: Union[None, str] = None,
+    env=None,
+    pty=True,
+    workdir: Union[str, Path, None] = None,
+    **kwargs,
+):
+    """Wrapper to run a command locally or inside the nautobot container."""
+    # Set default pty to True if not specified
+    kwargs["pty"] = pty
+
+    default_run = _resolve_default_run(context, default_run, service)
+
+    if isinstance(command, list):
+        command = " ".join(command)
+
+    if default_run == "local":
+        hide = kwargs.pop("hide", None)
+        if not hide:
             print_command(command, env=env)
-        context.run(command, pty=True, env=env, **kwargs)
+
+        # TBD workdir
+        context.run(" ".join(command), **kwargs)
+        return
     else:
-        # Check if Nautobot is running; no need to start another Nautobot container to run a command
-        docker_compose_status = "ps --services --filter status=running"
-        results = docker_compose(context, docker_compose_status, hide="out")
+        compose_command = [
+            "run --rm --entrypoint=''" if default_run == "run" else "exec",
+            *(f"--env {key}" for key in (env or {})),
+            f"--workdir={workdir}" if workdir else "",
+        ]
 
-        root = kwargs.pop("root", False)
-        if service in results.stdout:
-            compose_command = f"exec {'--user=root ' if root else ''}{service} {command}"
-        else:
-            compose_command = f"run {'--user=root ' if root else ''}--rm --entrypoint '{command}' {service}"
-
-        docker_compose(context, compose_command, pty=True)
+        docker_compose(context, compose_command, service, command, **kwargs)
 
 
 # ------------------------------------------------------------------------------
@@ -212,7 +265,7 @@ def run_command(context, command, service="nautobot", **kwargs):
         "service": "If specified, only build this service.",
     }
 )
-def build(context, force_rm=False, cache=True, poetry_parallel=True, pull=False, service=None):
+def build(context, force_rm=False, cache=True, poetry_parallel=True, pull=False, service=""):
     """Build Nautobot docker image."""
     command = f"build --build-arg PYTHON_VER={context.nautobot.python_ver}"
 
@@ -227,7 +280,7 @@ def build(context, force_rm=False, cache=True, poetry_parallel=True, pull=False,
 
     print(f"Building Nautobot with Python {context.nautobot.python_ver}...")
 
-    docker_compose(context, command, service=service, env={"DOCKER_BUILDKIT": "1", "COMPOSE_DOCKER_CLI_BUILD": "1"})
+    docker_compose(context, command, service=service, pty=False)
 
 
 @task(
@@ -247,11 +300,10 @@ def build_dependencies(context, poetry_parallel=True):
         "target": "dependencies",
     }
 
-    if len(result.groups()) < 1:
-        print("Failed to identify platform building for, falling back to default.")
-
-    else:
+    if result and len(result.groups()):
         build_kwargs["platforms"] = result.group(1)
+    else:
+        print("Failed to identify platform building for, falling back to default.")
 
     buildx(context, **build_kwargs)
 
@@ -386,32 +438,32 @@ def docker_push(context, branch, commit="", datestamp=""):
 # START / STOP / DEBUG
 # ------------------------------------------------------------------------------
 @task(help={"service": "If specified, only affect this service."})
-def debug(context, service=None):
+def debug(context, service=""):
     """Start Nautobot and its dependencies in debug mode."""
     print("Starting Nautobot in debug mode...")
     docker_compose(context, "up", service=service)
 
 
 @task(help={"service": "If specified, only affect this service."})
-def start(context, service=None):
+def start(context, service=""):
     """Start Nautobot and its dependencies in detached mode."""
     print("Starting Nautobot in detached mode...")
     docker_compose(context, "up --detach", service=service)
 
 
 @task(help={"service": "If specified, only affect this service."})
-def restart(context, service=None):
+def restart(context, service=""):
     """Gracefully restart containers."""
     print("Restarting Nautobot...")
     docker_compose(context, "restart", service=service)
 
 
 @task(help={"service": "If specified, only affect this service."})
-def stop(context, service=None):
+def stop(context, service=""):
     """Stop Nautobot and its dependencies."""
     print("Stopping Nautobot...")
     if not service:
-        docker_compose(context, "down")
+        docker_compose(context, "down --remove-orphans")
     else:
         docker_compose(context, "stop", service=service)
 
@@ -420,7 +472,7 @@ def stop(context, service=None):
 def destroy(context):
     """Destroy all containers and volumes."""
     print("Destroying Nautobot...")
-    docker_compose(context, "down --volumes")
+    docker_compose(context, "down --remove-orphans --volumes")
 
 
 @task
@@ -550,13 +602,7 @@ def build_nautobot_docs(context):
 def build_example_plugin_docs(context):
     """Build Example Plugin docs."""
     command = "mkdocs build --no-directory-urls --strict"
-    if is_truthy(context.nautobot.local):
-        local_command = f"cd examples/example_plugin && {command}"
-        print_command(local_command)
-        context.run(local_command, pty=True)
-    else:
-        docker_command = f"run --workdir='/source/examples/example_plugin' --entrypoint '{command}' nautobot"
-        docker_compose(context, docker_command, pty=True)
+    run_command(context, command, workdir="examples/example_plugin")
 
 
 # ------------------------------------------------------------------------------
@@ -701,13 +747,13 @@ def check_schema(context, api_version=None):
         "performance_report": "Generate Performance Testing report in the terminal. Has to set GENERATE_PERFORMANCE_REPORT=True in settings.py",
         "performance_snapshot": "Generate a new performance testing report to report.yml. Has to set GENERATE_PERFORMANCE_REPORT=True in settings.py",
     },
-    iterable=["tag", "exclude_tag"],
+    iterable=["tag", "exclude_tag", "label"],
 )
 def unittest(
     context,
     cache_test_fixtures=False,
     keepdb=False,
-    label="nautobot",
+    label=None,
     failfast=False,
     buffer=True,
     exclude_tag=None,
@@ -723,6 +769,8 @@ def unittest(
         # First build the docs so they are available.
         build_and_check_docs(context)
 
+    if not label:
+        label = ["nautobot"]
     append_arg = " --append" if append else ""
     command = f"coverage run{append_arg} --module nautobot.core.cli test {label}"
     command += " --config=nautobot/core/tests/nautobot_config.py"
@@ -826,36 +874,29 @@ def integration_test(
 )
 def migration_test(context, dataset, db_engine="postgres", db_name="nautobot_migration_test"):
     """Test database migration from a given dataset to latest Nautobot schema."""
-    if is_truthy(context.nautobot.local):
-        run_command(context, command=f"tar zxvf {dataset}")
+    if _resolve_default_run(context, None, service="db") == "local":
+        run_command(context, f"tar zxvf {dataset}")
     else:
         # DB must be running, else will fail with errors like:
         # dropdb: error: could not connect to database template1: could not connect to server: No such file or directory
         start(context, service="db")
         source_file = os.path.basename(dataset)
         context.run(f"docker cp '{dataset}' nautobot-db-1:/tmp/{source_file}")
-        run_command(context, command=f"tar zxvf /tmp/{source_file}", service="db")
+        run_command(context, f"tar zxvf /tmp/{source_file}")
 
     if db_engine == "postgres":
         common_args = "-U $NAUTOBOT_DB_USER --no-password -h localhost"
-        run_command(context, command=f"sh -c 'dropdb --if-exists {common_args} {db_name}'", service="db")
-        run_command(context, command=f"sh -c 'createdb {common_args} {db_name}'", service="db")
-        run_command(context, command=f"sh -c 'psql {common_args} -d {db_name} -f nautobot.sql'", service="db")
+        run_command(context, f"sh -c 'dropdb --if-exists {common_args} {db_name}'")
+        run_command(context, f"sh -c 'createdb {common_args} {db_name}'")
+        run_command(context, f"sh -c 'psql {common_args} -d {db_name} -f nautobot.sql'")
     else:
         # "weird historical idiosyncrasy in MySQL where 'localhost' means a UNIX socket, and '127.0.0.1' means TCP/IP"
         base_command = "mysql --user=$NAUTOBOT_DB_USER --password=$NAUTOBOT_DB_PASSWORD --host 127.0.0.1"
-        run_command(context, command=f"sh -c '{base_command} -e \"DROP DATABASE IF EXISTS {db_name};\"'", service="db")
-        run_command(context, command=f"sh -c '{base_command} -e \"CREATE DATABASE {db_name};\"'", service="db")
-        run_command(context, command=f"sh -c '{base_command} {db_name} < nautobot.sql'", service="db")
+        run_command(context, f"sh -c '{base_command} -e \"DROP DATABASE IF EXISTS {db_name};\"'")
+        run_command(context, f"sh -c '{base_command} -e \"CREATE DATABASE {db_name};\"'")
+        run_command(context, f"sh -c '{base_command} {db_name} < nautobot.sql'")
 
-    if is_truthy(context.nautobot.local):
-        run_command(context, command="nautobot-server migrate", env={"NAUTOBOT_DB_NAME": db_name})
-    else:
-        # We MUST use "docker-compose run ..." here as "docker-compose exec" doesn't support an `--env` flag.
-        docker_compose(
-            context,
-            command=f"run --rm --env NAUTOBOT_DB_NAME={db_name} --entrypoint 'nautobot-server migrate' nautobot",
-        )
+    run_command(context, command="nautobot-server migrate", service="nautobot", env={"NAUTOBOT_DB_NAME": db_name})
 
 
 @task(
@@ -936,20 +977,13 @@ def unittest_ui(
 )
 def prettier(context, autoformat=False):
     """Check Node.JS code style with Prettier."""
-    prettier_command = "npx prettier"
 
     if autoformat:
         arg = "--write"
     else:
         arg = "--check"
 
-    if is_truthy(context.nautobot.local):
-        run_command(context, f"cd nautobot/ui && {prettier_command} {arg} .")
-    else:
-        docker_compose(
-            context,
-            f"run --workdir='/opt/nautobot/ui' --entrypoint '{prettier_command} {arg} /source/nautobot/ui' nautobot",
-        )
+    run_command(context, f"npx prettier {arg} ./", workdir=_get_ui_path(context))
 
 
 @task(
@@ -959,28 +993,14 @@ def prettier(context, autoformat=False):
 )
 def eslint(context, autoformat=False):
     """Check for ESLint rule compliance and other style issues."""
-    eslint_command = "npx eslint --max-warnings 0"
+    command = [
+        "npx eslint",
+        "--max-warnings 0",
+        "--fix" if autoformat else "",
+        "./",
+    ]
 
-    if autoformat:
-        eslint_command += " --fix"
-
-    if is_truthy(context.nautobot.local):
-        # babel-preset-react-app / eslint requires setting environment variable for either
-        # `NODE_ENV` or `BABEL_ENV` to 'test'|'development'|'production'
-        run_command(context, f"cd nautobot/ui && NODE_ENV=test {eslint_command} .")
-    else:
-        # TODO: we should really run against /source/nautobot/ui, not /opt/nautobot/ui, but eslint aborts if we do:
-        #   ESLint couldn't find the config "@react-app" to extend from.
-        #   Please check that the name of the config is correct.
-        # Probably this is because we don't install node_modules under /source/nautobot/ui normally...?
-        #
-        # babel-preset-react-app / eslint requires setting environment variable for either
-        # `NODE_ENV` or `BABEL_ENV` to 'test'|'development'|'production'
-        docker_compose(
-            context,
-            "run --workdir='/opt/nautobot/ui' -e NODE_ENV=test "
-            f"--entrypoint '{eslint_command} /opt/nautobot/ui' nautobot",
-        )
+    run_command(context, command, service="nautobot", workdir=_get_ui_path(context), env={"NODE_ENV": "test"})
 
 
 @task(
